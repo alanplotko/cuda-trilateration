@@ -7,8 +7,8 @@
 #include <utility>
 #include <vector>
 
-#define BLOCK_N 16
-#define THREAD_N 2048
+#define BLOCK_N 2 // 16 on Alan's PC
+#define THREAD_N 96 // 2048 on Alan's PC
 
 struct Point {
     double x;
@@ -32,6 +32,12 @@ __device__ Point& operator+=(Point &a, const Point &b) {
     return a;
 }
 
+__device__ Point& operator/(Point &a, double d) {
+    a.x /= d;
+    a.y /= d;
+    return a;
+}
+
 __device__ Point Trilaterate(const Point &a, const Point &b, const Point &c, const Dist &ref) {
     double A = (-2 * a.x) + (2 * b.x),
            B = (-2 * a.y) + (2 * b.y),
@@ -39,26 +45,34 @@ __device__ Point Trilaterate(const Point &a, const Point &b, const Point &c, con
            D = (-2 * b.x) + (2 * c.x),
            E = (-2 * b.y) + (2 * c.y),
            F = (ref.db * ref.db) - (ref.dc * ref.dc) - (b.x * b.x) + (c.x * c.x) - (b.y * b.y) + (c.y * c.y);
+    if (A * E == D * B || B * D == E * A) { // Don't divide by 0
+        return Point { 0, 0 };
+    }
     return Point { ((C * E) - (F * B)) / ((A * E) - (D * B)), ((C * D) - (F * A)) / ((B * D) - (E * A)) };
 }
 
 // Kernel definition
-__global__ void FindPoint(const Point &a, const Point &b, const Point &c, const Dist *dst, size_t num, Point *pts) {
+__global__ void FindPoint(const Point a, const Point b, const Point c, const Dist *dst, size_t num, Point *pts) {
     __shared__ Point t[THREAD_N];
-    const int i = threadIdx.x;
-    const int vec_n = blockIdx.x;
-    if (i + vec_n * THREAD_N < num) {
-        t[i] = Trilaterate(a, b, c, dst[i + vec_n * THREAD_N]);
+    // const int i = threadIdx.x;
+    // const int vec_n = blockIdx.x;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    //if (i + vec_n * THREAD_N < num) {
+    if (i < num) {
+        printf("BlockIdx=%d, ThreadIdx=%d, i=%d, dst[i]=(%f,%f,%f)\n",
+                blockIdx.x, threadIdx.x, i, dst[i].da, dst[i].db, dst[i].dc);
+        int tid = threadIdx.x;
+        t[tid] = Trilaterate(a, b, c, dst[i]);//dst[i + vec_n * THREAD_N]);
         // Have each thread calculate the trilateration of a dst[i]
         __syncthreads();
         // Avg every 4 points, store in pts
         for (int fold = 2; fold > 0; fold /= 2) {
-            if (i % 4 < fold) { // 4-point segment
-                t[i] += t[i + fold];
+            if (tid % 4 < fold) { // 4-point segment
+                t[tid] += t[tid + fold];
             }
             __syncthreads();
         }
-        if (i % 4 == 0) pts[i/4] = t[i];
+        if (tid % 4 == 0) pts[i / 4] = t[tid] / 4;
     }
 }
 
@@ -175,25 +189,28 @@ int main(int argc, char* argv[]) {
     while (true) {
         double da, db, dc;
         ifs >> da >> db >> dc;
+        if (ifs.eof()) break;
         data.push_back(Dist(da, db, dc));
-        if(ifs.eof()) break;
+        //std::cerr << "Dist { " << da << " " << db << " " << dc << " }\n";
     }
+    //std::cerr << "Size of dists: " << data.size() << "\n";
+    ifs.close();
 
     Dist *dst;
     Point *pts;
     Point *res = new Point[data.size() / 4];
-    err = cudaMalloc((void **)&dst, data.size());
+    err = cudaMalloc((void **)&dst, data.size() * sizeof(Dist));
     if (err != cudaSuccess) {
         std::cerr << cudaGetErrorString(err) << "\n";
         exit(-1);
     }
-    err = cudaMalloc((void **)&pts, data.size() / 4);
+    err = cudaMalloc((void **)&pts, (data.size() / 4) * sizeof(Point));
     if (err != cudaSuccess) {
         std::cerr << cudaGetErrorString(err) << "\n";
         exit(-1);
     }
 
-    err = cudaMemcpy(dst, &data[0], data.size(), cudaMemcpyHostToDevice);
+    err = cudaMemcpy(dst, data.data(), data.size() * sizeof(Dist), cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
         std::cerr << cudaGetErrorString(err) << "\n";
         exit(-1);
@@ -201,7 +218,7 @@ int main(int argc, char* argv[]) {
 
     FindPoint<<<BLOCK_N, THREAD_N>>>(a, b, c, dst, data.size(), pts);
 
-    err = cudaMemcpy(res, pts, data.size() / 4, cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(res, pts, (data.size() / 4) * sizeof(Point), cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) {
         std::cerr << cudaGetErrorString(err) << "\n";
         exit(-1);
@@ -215,6 +232,5 @@ int main(int argc, char* argv[]) {
     cudaFree(pts);
     delete[] res;
 
-    ifs.close();
     return 0;
 }

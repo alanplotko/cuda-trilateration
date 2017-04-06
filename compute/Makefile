@@ -1,5 +1,5 @@
 CC = nvcc
-FLAGS = -Wno-deprecated-gpu-targets -std=c++11 -arch=sm_50 -g
+FLAGS = -Wno-deprecated-gpu-targets -std=c++11 -g -G
 FILENAME = assign2
 PROGNAME = trilateration
 
