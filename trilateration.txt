@@ -1,0 +1,13 @@
+AEx+BEy=CE
+DBx+EBy=FB
+
+x = CE - FB / AE - DB
+y = CD - FA / BD - EA
+
+ float A = (-2 * a.first) + (2 * b.first),
+          B = (-2 * a.second) + (2 * b.second),
+          C = (da * da) - (db * db) - (a.first * a.first) + (b.first * b.first) - (a.second * a.second) + (b.second * b.second),
+          D = (-2 * b.first) + (2 * c.first),
+          E = (-2 * b.second) + (2 * c.second),
+          F = (db * db) - (dc * dc) - (b.first * b.first) + (c.first * c.first) - (b.second * b.second) + (c.second * c.second);
+    p = std::make_pair(((C * E) - (F * B)) / ((A * E) - (D * B)), ((C * D) - (F * A)) / ((B * D) - (E * A)));
