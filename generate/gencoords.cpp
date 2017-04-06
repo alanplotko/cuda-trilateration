@@ -7,7 +7,6 @@
 #include <unistd.h>
 #include <utility>
 
-bool verifyMode = false;
 typedef std::pair<double, double> Point;
 
 std::ostream& operator<<(std::ostream& stream, Point& p) {
@@ -34,26 +33,27 @@ inline Point genPair() {
 
 int main(int argc, char* argv[]) {
     // Verify args and confirm filename
-    std::string filename = "coordinates.out";
+    std::string genFilename = "coordinates.out";
+    std::string verifyFilename = "verification.out";
     int flag;
     opterr = 0;
-    while ((flag = getopt(argc, argv, "vho:")) != -1) {
+    while ((flag = getopt(argc, argv, "hv:o:")) != -1) {
         switch(flag) {
             case 'v':
-                verifyMode = true;
+                verifyFilename = optarg;
                 break;
             case 'o':
-                filename = optarg;
+                genFilename = optarg;
                 break;
             case 'h':
                 std::cerr << "Usage: ./gen [-vho] <file-path>\n\n" <<
                              "Options:\n" <<
-                             "-v\t\t Enable verify mode (default: off)\n" <<
+                             "-v <file-path>\t Write verification output to provided file (default: verifcation.out)\n" <<
                              "-h\t\t Show usage string and exit\n" <<
                              "-o <file-path>\t Write output to provided file (default: coordinates.out)\n";
                 exit(-1);
             case '?':
-                if (optopt == 'o') {
+                if (optopt == 'o' || optopt == 'v') {
                     std::cerr << "Option -" << (char)optopt << " requires an argument.\n";
                 } else if (isprint(optopt)) {
                     std::cerr << "Unknown option `-" << (char)optopt << "'.\n";
@@ -72,41 +72,33 @@ int main(int argc, char* argv[]) {
     double da, db, dc;
 
     // Open file for writing coordinates
-    std::ofstream ofs;
-    ofs.open(filename, std::ofstream::out | std::ofstream::trunc);
+    std::ofstream gen, verify;
+    gen.open(genFilename, std::ofstream::out | std::ofstream::trunc);
+    verify.open(verifyFilename, std::ofstream::out | std::ofstream::trunc);
 
     // Write out guard points
-    ofs << a << "\n" << b << "\n" << c << "\n";
+    gen << a << "\n" << b << "\n" << c << "\n";
 
     // Calculate distances
     const int iterations = 12;
-    if (verifyMode) {
-        double avgX = 0.0, avgY = 0.0;
-        for (int i = 1; i <= iterations; i++) {
-            da = dist(a, p);
-            db = dist(b, p);
-            dc = dist(c, p);
-            avgX += p.first;
-            avgY += p.second;
-            if (i % 4 == 0) {
-                avgX /= 4.0;
-                avgY /= 4.0;
-                ofs << avgX << " " << avgY << "\n";
-                avgX = avgY = 0.0;
-            }
-            move(p);
+    double avgX = 0.0, avgY = 0.0;
+    for (int i = 1; i <= iterations; i++) {
+        da = dist(a, p);
+        db = dist(b, p);
+        dc = dist(c, p);
+        avgX += p.first;
+        avgY += p.second;
+        gen << da << " " << db << " " << dc << "\n";
+        if (i % 4 == 0) {
+            avgX /= 4.0;
+            avgY /= 4.0;
+            verify << avgX << " " << avgY << "\n";
+            avgX = avgY = 0.0;
         }
-    } else {
-        for (int i = 0; i < iterations; i++) {
-            da = dist(a, p);
-            db = dist(b, p);
-            dc = dist(c, p);
-            ofs << da << " " << db << " " << dc << "\n";
-            move(p);
-        }
-
+        move(p);
     }
 
-    ofs.close();
+    gen.close();
+    verify.close();
     return 0;
 }

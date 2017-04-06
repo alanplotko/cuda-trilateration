@@ -1,38 +1,80 @@
 #include <fstream>
 #include <iostream>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
-typedef std::pair<double, double> Point;
+#define BLOCK_N 16
+#define THREAD_N 2048
+
+struct Point {
+    double x;
+    double y;
+};
+
+struct Dist {
+    double da;
+    double db;
+    double dc;
+    Dist(double a, double b, double c) : da(a), db(b), dc(c) {}
+};
 
 std::ostream& operator<<(std::ostream& stream, Point& p) {
-    return stream << p.first << " " << p.second;
+    return stream << p.x << " " << p.y;
+}
+
+__device__ Point& operator+=(Point &a, const Point &b) {
+    a.x += b.x;
+    a.y += b.y;
+    return a;
+}
+
+__device__ Point Trilaterate(const Point &a, const Point &b, const Point &c, const Dist &ref) {
+    double A = (-2 * a.x) + (2 * b.x),
+           B = (-2 * a.y) + (2 * b.y),
+           C = (ref.da * ref.da) - (ref.db * ref.db) - (a.x * a.x) + (b.x * b.x) - (a.y * a.y) + (b.y * b.y),
+           D = (-2 * b.x) + (2 * c.x),
+           E = (-2 * b.y) + (2 * c.y),
+           F = (ref.db * ref.db) - (ref.dc * ref.dc) - (b.x * b.x) + (c.x * c.x) - (b.y * b.y) + (c.y * c.y);
+    return Point { ((C * E) - (F * B)) / ((A * E) - (D * B)), ((C * D) - (F * A)) / ((B * D) - (E * A)) };
 }
 
 // Kernel definition
-__global__ void FindPoint(const Point &a, const Point &b, const Point &c, double da, double db, double dc) {
-    int i = threadIdx.x;
-    float A = (-2 * a.first) + (2 * b.first),
-          B = (-2 * a.second) + (2 * b.second),
-          C = (da * da) - (db * db) - (a.first * a.first) + (b.first * b.first) - (a.second * a.second) + (b.second * b.second),
-          D = (-2 * b.first) + (2 * c.first),
-          E = (-2 * b.second) + (2 * c.second),
-          F = (db * db) - (dc * dc) - (b.first * b.first) + (c.first * c.first) - (b.second * b.second) + (c.second * c.second);
+__global__ void FindPoint(const Point &a, const Point &b, const Point &c, const Dist *dst, size_t num, Point *pts) {
+    __shared__ Point t[THREAD_N];
+    const int i = threadIdx.x;
+    const int vec_n = blockIdx.x;
+    if (i + vec_n * THREAD_N < num) {
+        t[i] = Trilaterate(a, b, c, dst[i + vec_n * THREAD_N]);
+        // Have each thread calculate the trilateration of a dst[i]
+        __syncthreads();
+        // Avg every 4 points, store in pts
+        for (int fold = 2; fold > 0; fold /= 2) {
+            if (i % 4 < fold) { // 4-point segment
+                t[i] += t[i + fold];
+            }
+            __syncthreads();
+        }
+        if (i % 4 == 0) pts[i/4] = t[i];
+    }
 }
 
 // Set up guard points
 void setGuards(std::ifstream &ifs, Point &a, Point &b, Point &c) {
-    double x, y;
-    ifs >> x >> y;
-    a = std::make_pair(x, y);
-    ifs >> x >> y;
-    b = std::make_pair(x, y);
-    ifs >> x >> y;
-    c = std::make_pair(x, y);
+    ifs >> a.x >> a.y
+        >> b.x >> b.y
+        >> c.x >> c.y;
 }
 
+/* The current CUDA API goes up to 3.0 SM support (Kepler). For newer
+ * architectures, like Maxwell and Pascal, we use this function that
+ * many industry professionals have agreed on to determine the number of
+ * cores. Until the API is updated to include the numbers for >3.0 SM, we
+ * will use this function to get the count.
+ */
 int getSPcores(cudaDeviceProp devProp) {
     int cores = 0;
     int mp = devProp.multiProcessorCount;
@@ -70,7 +112,7 @@ int main(int argc, char* argv[]) {
                 filename = optarg;
                 break;
             case 'h':
-                std::cerr << "Usage: ./gen [-vho] <file-path>\n\n" <<
+                std::cerr << "Usage: ./gen [-ho] <file-path>\n\n" <<
                              "Options:\n" <<
                              "-h\t\t Show usage string and exit\n" <<
                              "-i <file-path>\t Read input from provided file\n";
@@ -104,7 +146,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Use API to determine U and V values
-    int nDevices, U, V;
+    int nDevices, U = -1, V = -1;
     cudaError_t err = cudaGetDeviceCount(&nDevices);
     if (err != cudaSuccess) {
         std::cerr << cudaGetErrorString(err) << "\n";
@@ -119,19 +161,59 @@ int main(int argc, char* argv[]) {
     }
 
     // Set up guard points
-    Point a, b, c, p;
+    Point a, b, c;
     setGuards(ifs, a, b, c);
 
     // Read in distances and determine point p
-    double da, db, dc;
+    if (U == -1 || V == -1) {
+        std::cerr << "Error: Could not fetch information on number of multiprocessors or cores\n";
+        exit(-1);
+    }
+
+    std::vector<Dist> data;
+
     while (true) {
+        double da, db, dc;
         ifs >> da >> db >> dc;
-
-        // Kernel invocation with N threads
-        FindPoint<<<1, 1>>>(a, b, c, da, db, dc);
-
+        data.push_back(Dist(da, db, dc));
         if(ifs.eof()) break;
     }
+
+    Dist *dst;
+    Point *pts;
+    Point *res = new Point[data.size() / 4];
+    err = cudaMalloc((void **)&dst, data.size());
+    if (err != cudaSuccess) {
+        std::cerr << cudaGetErrorString(err) << "\n";
+        exit(-1);
+    }
+    err = cudaMalloc((void **)&pts, data.size() / 4);
+    if (err != cudaSuccess) {
+        std::cerr << cudaGetErrorString(err) << "\n";
+        exit(-1);
+    }
+
+    err = cudaMemcpy(dst, &data[0], data.size(), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cerr << cudaGetErrorString(err) << "\n";
+        exit(-1);
+    }
+
+    FindPoint<<<BLOCK_N, THREAD_N>>>(a, b, c, dst, data.size(), pts);
+
+    err = cudaMemcpy(res, pts, data.size() / 4, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << cudaGetErrorString(err) << "\n";
+        exit(-1);
+    }
+
+    for (int i = 0; i < data.size() / 4; i++) {
+        std::cerr << res[i] << "\n";
+    }
+
+    cudaFree(dst);
+    cudaFree(pts);
+    delete[] res;
 
     ifs.close();
     return 0;
