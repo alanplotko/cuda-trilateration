@@ -48,6 +48,7 @@ __device__ Point Trilaterate(const Point &a, const Point &b, const Point &c, con
     if (A * E == D * B || B * D == E * A) { // Don't divide by 0
         return Point { 0, 0 };
     }
+    // printf("P(%f, %f)\n", ((C * E) - (F * B)) / ((A * E) - (D * B)), ((C * D) - (F * A)) / ((B * D) - (E * A)));
     return Point { ((C * E) - (F * B)) / ((A * E) - (D * B)), ((C * D) - (F * A)) / ((B * D) - (E * A)) };
 }
 
@@ -59,8 +60,8 @@ __global__ void FindPoint(const Point a, const Point b, const Point c, const Dis
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     //if (i + vec_n * THREAD_N < num) {
     if (i < num) {
-        printf("BlockIdx=%d, ThreadIdx=%d, i=%d, dst[i]=(%f,%f,%f)\n",
-                blockIdx.x, threadIdx.x, i, dst[i].da, dst[i].db, dst[i].dc);
+        // printf("BlockIdx=%d, ThreadIdx=%d, i=%d, dst[i]=(%f,%f,%f)\n",
+        //         blockIdx.x, threadIdx.x, i, dst[i].da, dst[i].db, dst[i].dc);
         int tid = threadIdx.x;
         t[tid] = Trilaterate(a, b, c, dst[i]);//dst[i + vec_n * THREAD_N]);
         // Have each thread calculate the trilateration of a dst[i]
@@ -117,22 +118,26 @@ int getSPcores(cudaDeviceProp devProp) {
 
 int main(int argc, char* argv[]) {
     // Process flags
-    std::string filename;
+    std::string inputFile, outputFile;
     int flag;
     opterr = 0;
-    while ((flag = getopt(argc, argv, "hi:")) != -1) {
+    while ((flag = getopt(argc, argv, "hi:o:")) != -1) {
         switch(flag) {
             case 'i':
-                filename = optarg;
+                inputFile = optarg;
+                break;
+            case 'o':
+                outputFile = optarg;
                 break;
             case 'h':
-                std::cerr << "Usage: ./gen [-ho] <file-path>\n\n" <<
+                std::cerr << "Usage: ./assign2 [-hio] <file-path>\n\n" <<
                              "Options:\n" <<
                              "-h\t\t Show usage string and exit\n" <<
-                             "-i <file-path>\t Read input from provided file\n";
+                             "-i <file-path>\t Read input from provided file\n" <<
+                             "-o <file-path>\t Write output to file\n";
                 exit(-1);
             case '?':
-                if (optopt == 'i') {
+                if (optopt == 'i' || optopt == 'o') {
                     std::cerr << "Option -" << (char)optopt << " requires an argument.\n";
                 } else if (isprint(optopt)) {
                     std::cerr << "Unknown option `-" << (char)optopt << "'.\n";
@@ -146,16 +151,12 @@ int main(int argc, char* argv[]) {
     }
 
     // Ensure filename was passed
-    if (filename.empty()) {
+    if (inputFile.empty()) {
         std::cerr << "Error: input filename required\n";
         exit(-1);
     }
-
-    // Open input file for reading
-    std::ifstream ifs;
-    ifs.open(filename.c_str(), std::ios::in);
-    if (!ifs.is_open()) {
-        std::cerr << "Error: failed to open " << filename << "\n";
+    if (outputFile.empty()) {
+        std::cerr << "Error: output filename required\n";
         exit(-1);
     }
 
@@ -174,15 +175,23 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Set up guard points
-    Point a, b, c;
-    setGuards(ifs, a, b, c);
-
-    // Read in distances and determine point p
+    // Check values for U and V
     if (U == -1 || V == -1) {
         std::cerr << "Error: Could not fetch information on number of multiprocessors or cores\n";
         exit(-1);
     }
+
+    // Open input file for reading
+    std::ifstream ifs;
+    ifs.open(inputFile, std::ios::in);
+    if (!ifs.is_open()) {
+        std::cerr << "Error: failed to open " << inputFile << "\n";
+        exit(-1);
+    }
+
+    // Set up guard points
+    Point a, b, c;
+    setGuards(ifs, a, b, c);
 
     std::vector<Dist> data;
 
@@ -216,7 +225,11 @@ int main(int argc, char* argv[]) {
         exit(-1);
     }
 
-    FindPoint<<<BLOCK_N, THREAD_N>>>(a, b, c, dst, data.size(), pts);
+    // Set up our grid size to work with our input size
+    dim3 grid;
+    dim3 block(THREAD_N);
+    grid.x = ceil(data.size() * 1.0 / block.x);
+    FindPoint<<<grid, block>>>(a, b, c, dst, data.size(), pts);
 
     err = cudaMemcpy(res, pts, (data.size() / 4) * sizeof(Point), cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) {
@@ -224,9 +237,12 @@ int main(int argc, char* argv[]) {
         exit(-1);
     }
 
+    std::ofstream ofs;
+    ofs.open(outputFile, std::ofstream::out | std::ofstream::trunc);
     for (int i = 0; i < data.size() / 4; i++) {
-        std::cerr << res[i] << "\n";
+        ofs << res[i] << "\n";
     }
+    ofs.close();
 
     cudaFree(dst);
     cudaFree(pts);
