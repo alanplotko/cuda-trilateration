@@ -25,8 +25,8 @@ inline double fRand(double fMin, double fMax) {
 }
 
 inline void move(Point &p) {
-    p.first += fRand(-5.0, 5.0);
-    p.second += fRand(-5.0, 5.0);
+    p.first += fRand(-1.0, 1.0);
+    p.second += fRand(-1.0, 1.0);
 }
 
 inline Point genPair() {

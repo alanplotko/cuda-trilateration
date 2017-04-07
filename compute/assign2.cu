@@ -7,8 +7,8 @@
 #include <utility>
 #include <vector>
 
-#define BLOCK_N 2 // 16 on Alan's PC
-#define THREAD_N 96 // 2048 on Alan's PC
+#define BLOCK_N 2 // 16 on Alan's PC, 2 on remote
+#define THREAD_N 96 // 2048 on Alan's PC, 96 on remote
 
 struct Point {
     double x;
@@ -55,11 +55,9 @@ __device__ Point Trilaterate(const Point &a, const Point &b, const Point &c, con
 // Kernel definition
 __global__ void FindPoint(const Point a, const Point b, const Point c, const Dist *dst, size_t num, Point *pts) {
     __shared__ Point t[THREAD_N];
-    // const int i = threadIdx.x;
-    // const int vec_n = blockIdx.x;
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    //if (i + vec_n * THREAD_N < num) {
-    if (i < num) {
+    // const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < num; i += blockDim.x * gridDim.x) {
+    //if (i < num) {
         // printf("BlockIdx=%d, ThreadIdx=%d, i=%d, dst[i]=(%f,%f,%f)\n",
         //         blockIdx.x, threadIdx.x, i, dst[i].da, dst[i].db, dst[i].dc);
         int tid = threadIdx.x;
@@ -74,6 +72,7 @@ __global__ void FindPoint(const Point a, const Point b, const Point c, const Dis
             __syncthreads();
         }
         if (tid % 4 == 0) pts[i / 4] = t[tid] / 4;
+    //}
     }
 }
 
@@ -120,8 +119,9 @@ int main(int argc, char* argv[]) {
     // Process flags
     std::string inputFile, outputFile;
     int flag;
+    double UFactor = 1.0, VFactor = 1.0;
     opterr = 0;
-    while ((flag = getopt(argc, argv, "hi:o:")) != -1) {
+    while ((flag = getopt(argc, argv, "hi:o:U:V:")) != -1) {
         switch(flag) {
             case 'i':
                 inputFile = optarg;
@@ -129,15 +129,23 @@ int main(int argc, char* argv[]) {
             case 'o':
                 outputFile = optarg;
                 break;
+            case 'U':
+                UFactor = atof(optarg);
+                break;
+            case 'V':
+                VFactor = atof(optarg);
+                break;
             case 'h':
-                std::cerr << "Usage: ./assign2 [-hio] <file-path>\n\n" <<
+                std::cerr << "Usage: ./assign2 [-hioUV] <file-path>\n\n" <<
                              "Options:\n" <<
                              "-h\t\t Show usage string and exit\n" <<
                              "-i <file-path>\t Read input from provided file\n" <<
-                             "-o <file-path>\t Write output to file\n";
+                             "-o <file-path>\t Write output to file\n" <<
+                             "-U <factor for U>\t Block size = U (SMs) * factor for U\n" <<
+                             "-V <factor for V>\t Thread size = V (Cores) * factor for V\n";
                 exit(-1);
             case '?':
-                if (optopt == 'i' || optopt == 'o') {
+                if (optopt == 'i' || optopt == 'o' || optopt == 'U' || optopt == 'V') {
                     std::cerr << "Option -" << (char)optopt << " requires an argument.\n";
                 } else if (isprint(optopt)) {
                     std::cerr << "Unknown option `-" << (char)optopt << "'.\n";
@@ -171,7 +179,7 @@ int main(int argc, char* argv[]) {
             cudaDeviceProp prop;
             cudaGetDeviceProperties(&prop, i);
             U = prop.multiProcessorCount;
-            V = getSPcores(prop);
+            V = getSPcores(prop) / U; // Get number of cores per sm
         }
     }
 
@@ -225,11 +233,25 @@ int main(int argc, char* argv[]) {
         exit(-1);
     }
 
-    // Set up our grid size to work with our input size
-    dim3 grid;
-    dim3 block(THREAD_N);
-    grid.x = ceil(data.size() * 1.0 / block.x);
-    FindPoint<<<grid, block>>>(a, b, c, dst, data.size(), pts);
+    // Pass in our U and V for this run
+    // std::cerr << U << ", " << UFactor << ", " << V << ", " << VFactor << "\n";
+    int numBlocks = U * UFactor;
+    int numThreads = V * VFactor;
+
+    // Start timer
+    cudaEvent_t start, stop;
+    float elapsedTime;
+    cudaEventCreate(&start);
+    cudaEventRecord(start, 0);
+
+    FindPoint<<<numBlocks, numThreads>>>(a, b, c, dst, data.size(), pts);
+
+    // End timer
+    cudaEventCreate(&stop);
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&elapsedTime, start, stop);
+    std::cerr << "Elapsed time: " << elapsedTime << " ms\n";
 
     err = cudaMemcpy(res, pts, (data.size() / 4) * sizeof(Point), cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) {
